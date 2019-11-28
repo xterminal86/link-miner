@@ -83,14 +83,31 @@ def GetBaseUrl(url):
 
 def WriteResults():
   global ResultsWritten;
+  global TimeoutSeconds;
   if ResultsWritten == True:
     return;
   print("Writing results ({0} links mined)...".format(len(Urls)));
   f = open("links.txt", "w");
+  counter = 0;
+  total = len(Urls);
   for key in Urls:
-    f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, Urls[key]));
+    meta = Urls[key];
+    if meta is None:
+      try:
+        r = requests.get(key, timeout=TimeoutSeconds);
+        meta = GetMetadata(r.content);
+        Urls[key] = meta;
+      except:
+        continue;
+    try:
+      f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, meta));
+    except:
+      f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, sys.exc_info()));
+      continue;
+    print(" Writing {0}/{1}\r".format(counter, total), end="");
+    counter += 1;
   f.close();
-  print("Done!");
+  print("\nDone!");
   ResultsWritten = True;
 
 def thread_function(name):
