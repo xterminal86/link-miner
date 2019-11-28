@@ -43,16 +43,41 @@ def FindUrls(string):
   url = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\), ]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', str);
   return url
 
+def GetMetadata(content):
+  retVal = "<NONE OR COULDN'T GET>";
+  str = content.decode("utf-8");
+  lowercase = str.lower();
+  r = lowercase.find('<meta name="description" content=');
+  rest = lowercase[r:];
+  res = rest.find('>');
+  if res != -1:
+    s = str[r:];
+    retVal = s[:res + 1];
+  else:
+    res = rest.find('/>');
+    if res != -1:
+      s = str[r:];
+      retVal = s[:res];
+  #print("{0}\n>>>\n{1}\n<<<\n\n".format(res, retVal));
+  return retVal;
+
 # Returns URL without trailing part
 # (i.e. http://test.com not http://test.com/fuck/bees?id=42)
 def GetBaseUrl(url):
   baseUrl = "";
+  stopChars = [ '?', '&', '\'', '"', '\n', ' ', ':' ];
   slashCount = 0;
   for c in url:
     if c == '/':
       slashCount += 1;
       if slashCount == 3:
         break;
+
+    # If we encountered something like
+    # http://fuck.bees?sumShiet=33 or http://fuck.bees&sumShiet=33
+    if slashCount == 2 and (c in stopChars):
+      break;
+
     baseUrl += c;
   return baseUrl;
 
@@ -60,10 +85,10 @@ def WriteResults():
   global ResultsWritten;
   if ResultsWritten == True:
     return;
-  print("Writing result...");
+  print("Writing results ({0} links mined)...".format(len(Urls)));
   f = open("links.txt", "w");
   for key in Urls:
-    f.write("{0}\n".format(key));
+    f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, Urls[key]));
   f.close();
   print("Done!");
   ResultsWritten = True;
@@ -77,6 +102,9 @@ def thread_function(name):
   logging.info("Thread %s: starting", name)
 
   while True:
+    if ExitApp == True:
+      break;
+
     urlForRequest = [];
 
     if Iterations > MaxIterations:
@@ -106,6 +134,13 @@ def thread_function(name):
       logging.info("requests.get() failed: {0} - {1}".format(r.status_code, r.content));
       continue;
 
+    try:
+      meta = GetMetadata(r.content);
+      #print("{0} - {1}".format(urlForRequest[0], meta));
+    except:
+      logging.info("GetMetadata() failed: {0} - {1}".format(r.status_code, r.content));
+      continue;
+
     l = FindUrls(r.content);
     urls = [];
     for item in l:
@@ -115,6 +150,7 @@ def thread_function(name):
     d = dict.fromkeys(urls);
     ThreadLock.acquire();
     Urls.update(d);
+    Urls[urlForRequest[0]] = meta;
     Start.update(d);
     Iterations += 1;
     ThreadLock.release();
@@ -151,8 +187,5 @@ if __name__ == "__main__":
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=maxJobs) as executor:
       executor.map(thread_function, range(maxJobs));
-
-  while ExitApp != True:
-    continue;
 
   WriteResults();
