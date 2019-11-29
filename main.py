@@ -20,6 +20,7 @@ Start = { "http://www.stoloto.ru" : None };
 Urls = {};
 
 ExitApp = False;
+StopWriting = False;
 
 # Maximum number of requests
 MaxIterations = 10;
@@ -84,19 +85,21 @@ def GetBaseUrl(url):
 def WriteResults():
   global ResultsWritten;
   global TimeoutSeconds;
+  global StopWriting;
   if ResultsWritten == True:
     return;
   print("Writing results ({0} links mined)...".format(len(Urls)));
-  f = open("links.txt", "w");
+  f = open("links.txt", "w", encoding="utf-8");
   counter = 0;
   total = len(Urls);
   for key in Urls:
+    if StopWriting == True:
+      break;
     meta = Urls[key];
     if meta is None:
       try:
         r = requests.get(key, timeout=TimeoutSeconds);
         meta = GetMetadata(r.content);
-        Urls[key] = meta;
       except:
         continue;
     try:
@@ -115,11 +118,15 @@ def thread_function(name):
   global Iterations;
   global MaxIterations;
   global TimeoutSeconds;
-
+  
+  progr = [ '|', '/', '-', '\\' ];
+  maxRetries = 3;
+  retryCount = 0;
+  
   logging.info("Thread %s: starting", name)
 
   while True:
-    if ExitApp == True:
+    if ExitApp == True or retryCount > maxRetries:
       break;
 
     urlForRequest = [];
@@ -134,6 +141,7 @@ def thread_function(name):
       ThreadLock.acquire();
       urlForRequest = Start.popitem();
       ThreadLock.release();
+      retryCount = 0;
     else:
       #logging.info("Thread {0} - no jobs".format(name));
       time.sleep(0.2);
@@ -149,6 +157,7 @@ def thread_function(name):
 
     if not r:
       logging.info("requests.get() failed: {0} - {1}".format(r.status_code, r.content));
+      retryCount += 1;
       continue;
 
     try:
@@ -170,6 +179,7 @@ def thread_function(name):
     Urls[urlForRequest[0]] = meta;
     Start.update(d);
     Iterations += 1;
+    print(" {0}\r".format(progr[Iterations % len(progr)]), end="");
     ThreadLock.release();
     time.sleep(1);
 
@@ -177,9 +187,14 @@ def thread_function(name):
 
 def SignalHandler(sig, frame):
   global ExitApp;
-  print("!!! SIGINT !!!");
-  WriteResults();
-  ExitApp = True;
+  global StopWriting;
+  print("!!! SIGINT !!!");  
+  if ExitApp == False:
+    ExitApp = True;
+    WriteResults();
+  else:
+    if StopWriting == False:
+      StopWriting = True;
 
 if __name__ == "__main__":
   maxJobs = 1;
