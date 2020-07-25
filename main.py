@@ -1,32 +1,40 @@
 #!/usr/bin/python3
 
 import sys;
-import logging
-import threading
-import time
-import concurrent.futures;
+import logging;
+import threading;
+import time;
 import re;
 import requests;
 import signal;
+import argparse;
 
 from threading import Lock;
 
 ThreadLock = Lock();
 
 # Initial URL to mine from
-Start = { "http://www.stoloto.ru" : None };
+Start = {};
 
 # Result will be stored here
 Urls = {};
 
 ExitApp = False;
 StopWriting = False;
+NoMeta = True;
+HttpOnly = True;
+
+# Worker threads
+MaxThreads = 1;
 
 # Maximum number of requests
 MaxIterations = 10;
 
 # Requests counter
 Iterations = 0;
+
+# Number of seconds to sleep after thread work is done
+SleepSeconds = 1;
 
 # Flag that determines if results have already been written to file
 ResultsWritten = False;
@@ -38,11 +46,20 @@ TimeoutSeconds = 5;
 LogLevel = logging.CRITICAL;
 
 def FindUrls(string):
+  global HttpOnly;
+  
   # findall() has been used
   # with valid conditions for urls in string
   str = string.decode("iso-8859-1");
-  url = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\), ]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', str);
-  return url
+
+  urls = "";
+  
+  if HttpOnly == True:
+    urls = re.findall('http://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\), ]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', str);
+  else:
+    urls = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\), ]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', str);
+    
+  return urls;
 
 def GetMetadata(content):
   retVal = "<NONE OR COULDN'T GET>";
@@ -86,29 +103,38 @@ def WriteResults():
   global ResultsWritten;
   global TimeoutSeconds;
   global StopWriting;
+  global NoMeta;
+  
   if ResultsWritten == True:
     return;
+    
   print("Writing results ({0} links mined)...".format(len(Urls)));
   f = open("links.txt", "w", encoding="utf-8");
   counter = 0;
   total = len(Urls);
-  for key in Urls:
+  for key in Urls:    
+  
     if StopWriting == True:
-      break;
+      break;    
+    
     meta = Urls[key];
-    if meta is None:
+    
+    if NoMeta == False:
       try:
         r = requests.get(key, timeout=TimeoutSeconds);
         meta = GetMetadata(r.content);
       except:
         continue;
+      
     try:
       f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, meta));
     except:
       f.write("{0}\n>>>\n{1}\n<<<\n\n".format(key, sys.exc_info()));
       continue;
-    print(" Writing {0}/{1}\r".format(counter, total), end="");
-    counter += 1;
+      
+    print(" Writing {0}/{1}\r".format(counter + 1, total), end="");    
+    counter += 1;    
+    
   f.close();
   print("\nDone!");
   ResultsWritten = True;
@@ -118,6 +144,8 @@ def thread_function(name):
   global Iterations;
   global MaxIterations;
   global TimeoutSeconds;
+  global SleepSeconds;
+  global MaxThreads;
   
   progr = [ '|', '/', '-', '\\' ];
   maxRetries = 3;
@@ -128,8 +156,8 @@ def thread_function(name):
   while True:
     if ExitApp == True or retryCount > maxRetries:
       break;
-
-    urlForRequest = [];
+    
+    urlForRequest = "";
 
     if Iterations > MaxIterations:
       ThreadLock.acquire();
@@ -139,20 +167,37 @@ def thread_function(name):
 
     if len(Start) != 0:
       ThreadLock.acquire();
-      urlForRequest = Start.popitem();
+      key = list(Start.keys())[0];
+      urlForRequest = key;
+      Start.pop(key);
       ThreadLock.release();
       retryCount = 0;
-    else:
-      #logging.info("Thread {0} - no jobs".format(name));
-      time.sleep(0.2);
-      continue;
+    else:          
+      if MaxThreads > 1:        
+        logging.info("Thread {0} - no jobs (try {1}/{2})".format(name, retryCount, maxRetries));
+        
+        # Since this shit is kinda multithreaded, there can be a situation
+        # when dictionary of links yet to be processed is empty,
+        # because other thread(s) has emptied it.
+        # So we can't just abort thread on condition if dictionary is empty,
+        # because it may result in the whole process to be degenerated 
+        # into single threaded type because, e.g., first thread have just popped
+        # starting item and all others now see that dictionary as empty. 
+        # That's why we try several times to see if dictionary was 
+        # filled with new data and only if it hadn't been we abort.      
+        time.sleep(TimeoutSeconds);     
+        
+        retryCount += 1;
+        continue;
+      else:
+        break;
 
-    logging.info("Trying {0} ({1}/{2})".format(urlForRequest[0], Iterations, MaxIterations));
-
+    logging.info("Trying {0} ({1}/{2})".format(urlForRequest, Iterations, MaxIterations));
+    
     try:
-      r = requests.get(urlForRequest[0], timeout=TimeoutSeconds);
+      r = requests.get(urlForRequest, timeout=TimeoutSeconds);
     except:
-      logging.info("\n\n*****\nException: {0}\n*****\n".format(sys.exc_info()));
+      logging.info("\n\n*****\nException: {0}\n*****\n".format(sys.exc_info()));      
       continue;
 
     if not r:
@@ -161,33 +206,46 @@ def thread_function(name):
       continue;
 
     try:
-      meta = GetMetadata(r.content);
-      #print("{0} - {1}".format(urlForRequest[0], meta));
+      meta = None;
+      
+      if NoMeta == False:      
+        meta = GetMetadata(r.content);
+        
+      #print("{0} - {1}".format(urlForRequest, meta));
     except:
       logging.info("GetMetadata() failed: {0} - {1}".format(r.status_code, r.content));
       continue;
 
     l = FindUrls(r.content);
+    
     urls = [];
+    
     for item in l:
-      baseUrl = GetBaseUrl(item);
+      baseUrl = GetBaseUrl(item);    
+      
       if baseUrl not in Urls:
         urls.append(baseUrl);
+        
     d = dict.fromkeys(urls);
-    ThreadLock.acquire();
+    
+    ThreadLock.acquire();    
     Urls.update(d);
-    Urls[urlForRequest[0]] = meta;
+    Urls[urlForRequest] = meta;
     Start.update(d);
     Iterations += 1;
-    print(" {0}\r".format(progr[Iterations % len(progr)]), end="");
+    print(" {0} {1}/{2}\r".format(progr[Iterations % len(progr)], Iterations, MaxIterations), end="");
     ThreadLock.release();
-    time.sleep(1);
+    
+    time.sleep(SleepSeconds);
 
   logging.info("Thread %s: finishing", name)
 
 def SignalHandler(sig, frame):
   global ExitApp;
   global StopWriting;
+  global Start;
+  global MaxThreads;
+  
   print("!!! SIGINT !!!");  
   if ExitApp == False:
     ExitApp = True;
@@ -199,25 +257,50 @@ def SignalHandler(sig, frame):
 if __name__ == "__main__":
   maxJobs = 1;
 
-  if len(sys.argv) == 1:
-    print("{0} <WORKERS=1> <MAX_ITERATIONS=10> [--verbose]".format(sys.argv[0]));
-    sys.exit(0);
-
-  signal.signal(signal.SIGINT, SignalHandler);
-
-  if len(sys.argv) > 2 and sys.argv[1].isdigit():
-    maxJobs = int(sys.argv[1]);
-    print("{0} threads".format(maxJobs));
-    if sys.argv[2].isdigit():
-      MaxIterations = int(sys.argv[2]);
-      print("Up to {0} iterations".format(MaxIterations));
-    if len(sys.argv) == 4 and sys.argv[3] == "--verbose":
-      LogLevel = logging.INFO;
-
+  ap = argparse.ArgumentParser(description="Search the Internet for links.\nTry different combinations of threads / iterations, or run several times for best results.", formatter_class=argparse.RawTextHelpFormatter);
+  ap.add_argument("START", default="http://www.yandex.ru", help="URL to start searching from (in full signature)");
+  ap.add_argument("WORKERS", default=maxJobs, help="number of threads (default 1)");
+  ap.add_argument("MAX_ITERATIONS", default=MaxIterations, help="maximum number of find iterations (default 10)");  
+  ap.add_argument("--sleep", default=SleepSeconds, help="number of seconds to sleep after one thread work iteration (default 1.0)", required=False);
+  ap.add_argument("--all", action="store_true", help="search for http and https links (default 'http only')", required=False);
+  ap.add_argument("--with-meta", action="store_true", help="get <META description> text (default no)", required=False);
+  ap.add_argument("--verbose", action="store_true", help="print some tech details along the way as well (default no)", required=False);
+  
+  res = ap.parse_args();
+  
+  Start[res.START] = None;
+  
+  maxJobs = int(res.WORKERS, 10);
+  
+  MaxThreads = maxJobs;
+  MaxIterations = int(res.MAX_ITERATIONS, 10);
+  SleepSeconds = float(res.sleep);
+  
+  if res.all == True:
+    HttpOnly = False;
+    
+  if res.verbose == True:
+    LogLevel = logging.INFO;
+    
+  if res.with_meta == True:
+    NoMeta = False;
+  
+  print("{0} threads".format(maxJobs));    
+  print("Up to {0} iterations".format(MaxIterations));
+  
   format = "%(asctime)s: %(message)s";
   logging.basicConfig(format=format, level=LogLevel, datefmt="%H:%M:%S");
 
-  with concurrent.futures.ThreadPoolExecutor(max_workers=maxJobs) as executor:
-      executor.map(thread_function, range(maxJobs));
+  signal.signal(signal.SIGINT, SignalHandler);
 
+  threads = [];
+  for index in range(maxJobs):
+    t = threading.Thread(target=thread_function, args=(index,));
+    threads.append(t);
+    t.start();
+    
+  for index, thread in enumerate(threads):
+    thread.join();
+    
   WriteResults();
+  
